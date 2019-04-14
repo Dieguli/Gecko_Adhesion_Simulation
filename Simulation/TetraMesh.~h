@@ -1,0 +1,100 @@
+//---------------------------------------------------------------------------
+
+#ifndef TetraMeshH
+#define TetraMeshH
+
+#include "Vertex.h"
+#include "Tetra.h"
+#include "TetraArray.h"
+#include "VertexArray.h"
+
+class World;
+class TetraArray;
+class VertexArray;
+
+//---------------------------------------------------------------------------
+class TetraMesh
+//--------------------------------------------------------------------
+{
+public:
+  // generate a block mesh
+  TetraMesh(World *world, int numX, int numY, int numZ, float size,
+            Vector3d &translate);
+  // generate a mesh from a file
+  TetraMesh(World *world, char *filename, float scale, Vector3d &translate);
+  ~TetraMesh();
+
+  //void animate(int numIters);
+  void animate(int numIters, TetraMesh *mesh1, TetraMesh *mesh2);
+
+  void reset();
+  void draw();
+
+  Vertex *findClosestVertex(int x, int y, float &depth);
+  void mouseDown(int x, int y);
+  void mouseMove(int x, int y);
+  void mouseUp(int x, int y);
+
+  int  numVertices() { return _vertices.count(); }
+  int  numTetras() { return _tetras.count(); }
+  Tetra  *getTetra(int i) { return _tetras[i]; }
+  Vertex *getVertex(int i) { return _vertices[i]; }
+
+  void fixBottom(float fract);
+  void fixTop(float fract);
+  void fixLeft(float fract);
+  void fixRight(float fract);
+  void fixNone();
+
+  void getBounds(Bounds3d &bounds);
+  float avgTetraSize();
+  void rotate(float phiX, float phiY, float phiZ);
+
+  void deleteAllObjects();
+  // Convertdo a public
+  VertexArray   _verticesFrontera;
+  VertexArray   _vertices;
+  void clearExternalForces();
+  //---------------------------------------------------------
+  void addExternalForcesRep(TetraMesh *mesh1, TetraMesh *mesh2);
+private:
+  void init();
+  //void clearExternalForces();
+  void addExternalForces();
+
+  Tetra*    addTetra(int i1, int i2, int i3, int i4);
+  Vertex*   addVertex(Vector3d &pos);
+  Vertex*  addVertexFrontera(Vector3d &pos);
+
+  void generateBlock(int numX, int numY, int numZ, float size,
+                     Vector3d &translate);
+  bool loadFromFile(char *filename, float scale, Vector3d &translate);
+  void findTetraNeighbors();
+  void computeForceDistribution(Vertex *v, float radius);
+
+  void animateDynamic(float delta_t);
+  void updateBounds();
+
+  // dynamics
+  void conjugateGradients(int minIters, int maxIters, VertexArray &verts);
+  void gaussSeidel(int iters, VertexArray &verts);
+
+  // ------------- representation -------------------------------
+
+  //VertexArray   _vertices;
+  //VertexArray   _verticesFrontera;
+  TetraArray    _tetras;
+
+  VertexArray   _activeVertices;  // subset of _vertices
+  VertexArray   _activeVerticesFrontera; // Solamente para la repulsión.
+
+  World*    _itsWorld;
+
+  Bounds3d  _bounds;        // rectangular bounding box
+
+  Vertex*   _springVertex;  // user interaction via a spring
+  Vector3d  _springPos;
+  float     _springDepth;
+};
+
+#endif

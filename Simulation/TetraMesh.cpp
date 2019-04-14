@@ -1,0 +1,1083 @@
+//---------------------------------------------------------------------------
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "World.h"
+#include "TetraMesh.h"
+#include "Tetra.h"
+#include "Vertex.h"
+#include "Matrix3d.h"
+#include "Draw.h"
+#include "assert.h"
+#include "PhysicsParams.h"
+
+// ----------- physics parameters ---------------------------------
+
+#define DEFAULT_YOUNG_MODULUS 0.02e6
+#define FRACTURE_FACT 1.0
+
+#define GRAB_MIN_PIXELS 20    // pixels
+#define GJ_ERROR_THRESHOLD 0.001
+
+
+//---------------------------------------------------------------------------
+TetraMesh::TetraMesh(World *world, char *filename, float scale,
+                     Vector3d &translate)
+//---------------------------------------------------------------------------
+{
+  _itsWorld = world;
+  init();
+  loadFromFile(filename, scale, translate);
+  findTetraNeighbors();
+  reset();
+  updateBounds();
+}
+
+//---------------------------------------------------------------------------
+TetraMesh::TetraMesh(World *world, int numX, int numY, int numZ, float size,
+                     Vector3d &translate)
+//---------------------------------------------------------------------------
+{
+  _itsWorld = world;
+  init();
+  generateBlock(numX, numY, numZ, size, translate);
+  findTetraNeighbors();
+  reset();
+  updateBounds();
+}
+
+
+//---------------------------------------------------------------------------
+TetraMesh::~TetraMesh()
+//---------------------------------------------------------------------------
+{
+}
+
+
+//---------------------------------------------------------------------------
+void TetraMesh::deleteAllObjects()
+//---------------------------------------------------------------------------
+{
+  _vertices.deleteAll();
+  _tetras.deleteAll();
+}
+
+
+//---------------------------------------------------------------------------
+void TetraMesh::init()
+//---------------------------------------------------------------------------
+{
+  _springVertex = NULL;
+  _springPos.set(0,0,0);
+  _springDepth = 0.0;
+}
+
+// -------------------------------------------------------------
+void TetraMesh::reset()
+// -------------------------------------------------------------
+{
+  for (int i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    v->_worldCoord = v->_originalCoord;
+    v->_velocity.set(0,0,0);
+    v->_solution.set(0,0,0);
+    if (v->numNeighbors() <= 0) v->_animated = false;
+
+    v->_forceDistr = 0.0;
+    v->_fExt.set(0,0,0);
+    v->_mark = -1;
+    v->_fractureMark = 0;
+    v->_r.set(0,0,0); v->_p.set(0,0,0); v->_u.set(0,0,0);
+    v->_colliding = false;
+    v->_collDisp.setZero();
+  }
+  _springVertex = NULL;
+}
+
+// ---------------------------------------------------------------------------
+Tetra *TetraMesh::addTetra(int i1, int i2, int i3, int i4)
+// ---------------------------------------------------------------------------
+{
+  Tetra *tetra = new Tetra(this, _vertices[i1],_vertices[i2],
+     _vertices[i3],_vertices[i4]);
+  _tetras.add(tetra);
+  return tetra;
+}
+
+
+// ------------------------------------------------------------
+Vertex *TetraMesh::addVertex(Vector3d &pos)
+// ------------------------------------------------------------
+{
+  Vertex *vertex = new Vertex(pos.x, pos.y, pos.z);
+  _vertices.add(vertex);
+  return vertex;
+}
+
+ // ------------------------------------------------------------
+Vertex *TetraMesh::addVertexFrontera(Vector3d &pos)
+// ------------------------------------------------------------
+{
+  Vertex *vertex = new Vertex(pos.x, pos.y, pos.z);
+  _verticesFrontera.add(vertex);
+  return vertex;
+}
+
+
+// ------------------------------------------------------------
+void TetraMesh::updateBounds()
+// ------------------------------------------------------------
+{
+  _bounds.clear();
+  for (int i = 1; i < _vertices.count(); i++)
+    _bounds.include(_vertices[i]->_worldCoord);
+}
+
+
+// ------------------------------------------------------------
+float TetraMesh::avgTetraSize()
+// ------------------------------------------------------------
+{
+  float sum = 0.0;
+  int numTetras = _tetras.count();
+  if (numTetras <= 0) return 0.0;
+  for (int i = 0;  i < numTetras; i++) {
+    Tetra *t = _tetras[i];
+    t->updateBounds();
+    Bounds3d *b = &t->_bounds;
+    sum += b->_max.x - b->_min.x;
+    sum += b->_max.y - b->_min.y;
+    sum += b->_max.z - b->_min.z;
+  }
+  return sum / (3 * numTetras);
+}
+
+
+// --------------------------------------------------------------------------
+bool TetraMesh::loadFromFile(char *filename, float scale, Vector3d &translate)
+// --------------------------------------------------------------------------
+{
+  FILE *f = fopen(filename, "r");
+  if (!f) return false;
+  char s[STRING_LEN], name[STRING_LEN];
+
+  fgets(s, STRING_LEN, f);
+  if (strncmp(s, "tet version 1.0",15)) {
+    fclose(f);
+    return false;
+  }
+  fgets(s, STRING_LEN, f);
+  while (strncmp(s, "VERTICES", 9))
+    fgets(s, STRING_LEN, f);
+
+  fgets(s, STRING_LEN, f);
+  while (strncmp(s, "TETRAS", 6)) {
+    Vector3d pos;
+    sscanf(s, "%f %f %f", &pos.x, &pos.y, &pos.z);
+    pos.scale(scale); pos.add(translate);
+    addVertex(pos);
+    fgets(s, STRING_LEN, f);
+  }
+
+  fgets(s, STRING_LEN, f);
+  while (!feof(f) && strncmp(s, "TRIANGLES", 9)) {
+    int i1, i2, i3, i4, matNr;
+    sscanf(s, "%i %i %i %i %i", &i1, &i2, &i3, &i4, &matNr);
+    addTetra(i1, i2, i3, i4);
+    fgets(s, STRING_LEN, f);
+  }
+  fclose(f);
+  return true;
+}
+
+
+// ---------------------------------------------------------------------
+void TetraMesh::generateBlock(int numX, int numY, int numZ, float size,
+        Vector3d &translate)
+// ---------------------------------------------------------------------
+{
+  int i,j,k;
+  Vector3d pos;
+
+  // vertices
+
+  for (i = 0; i <= numX; i++) {
+    for (j = 0; j <= numY; j++) {
+      for (k = 0; k <= numZ; k++) {
+        pos.set(size*i, size*j, size*k);
+        pos.add(translate);
+        addVertex(pos);
+
+
+        //-------------------------------------------
+       /*
+        if (i==0) {
+        pos.set(0, size*j, size*k);
+        pos.add(translate);
+        addVertexFrontera(pos);
+        }
+        if (i==numX){
+        pos.set(size*numX, size*j, size*k);
+        pos.add(translate);
+        addVertexFrontera(pos);
+        }
+        if ()
+
+        */
+
+        //-------------------------------------------
+
+      }
+    }
+  }
+   //------ Guardar nodos de las caras:
+  // cara 1:
+    for (j = 0; j <= numY; j++) {
+      for (k = 0; k <= numZ; k++) {
+        pos.set(0, size*j, size*k);
+        pos.add(translate);
+        addVertexFrontera(pos);  // CAMBIAR MÉTODO POR addVertexCara();
+      }
+    }
+
+    // cara 2:
+    for (j = 0; j <= numY; j++) {
+      for (k = 0; k <= numZ; k++) {
+        pos.set(size*numX, size*j, size*k);
+        pos.add(translate);
+        addVertexFrontera(pos);  // CAMBIAR MÉTODO POR addVertexCara();
+      }
+    }
+
+    //cara 3:
+
+    for (i = 0; i <= numX; i++) {
+    for (j = 0; j <= numY; j++) {
+        pos.set(size*i, size*j, 0);
+        pos.add(translate);
+        addVertexFrontera(pos);  // CAMBIAR MÉTODO POR addVertexCara();
+      }
+    }
+
+    //cara 4:
+
+    for (i = 0; i <= numX; i++) {
+    for (j = 0; j <= numY; j++) {
+        pos.set(size*i, size*j, size*numZ);
+        pos.add(translate);
+        addVertexFrontera(pos);   // CAMBIAR MÉTODO POR addVertexCara();
+      }
+    }
+
+     // cara 5:
+
+  for (i = 0; i <= numX; i++) {
+  for (k = 0; k <= numZ; k++) {
+        pos.set(size*i, 0, size*k);
+        pos.add(translate);
+        addVertexFrontera(pos);   // CAMBIAR MÉTODO POR addVertexCara();
+      }
+
+  }
+
+     // cara 6:
+
+  for (i = 0; i <= numX; i++) {
+  for (k = 0; k <= numZ; k++) {
+        pos.set(size*i, size*numY, size*k);
+        pos.add(translate);
+       addVertexFrontera(pos);  // CAMBIAR MÉTODO POR addVertexCara();
+      }
+
+  }
+
+  //-----------------------------------------
+
+   for (int i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    if (v->_worldCoord.x==0) {v->_frontera = true;}  //Cara 1
+    if (v->_worldCoord.x==size*numX) {v->_frontera = true;}  //Cara 2
+    if (v->_worldCoord.y==0) {v->_frontera = true;}  //Cara 3
+    if (v->_worldCoord.y==size*numY) {v->_frontera = true;}  //Cara 4
+    if (v->_worldCoord.z==0) {v->_frontera = true;}  //Cara 5
+    if (v->_worldCoord.z==size*numZ) {v->_frontera = true;}  //Cara 6
+    }
+
+  // tetrahedra
+
+  int i1,i2,i3,i4,i5,i6,i7,i8;
+
+  for (i = 0; i < numX; i++) {
+    for (j = 0; j < numY; j++) {
+      for (k = 0; k < numZ; k++) {
+        i5 = (i*(numY+1) + j)*(numZ+1) + k; i1 = i5+1;
+        i6 = ((i+1)*(numY+1) + j)*(numZ+1) + k; i2 = i6+1;
+        i7 = ((i+1)*(numY+1) + (j+1))*(numZ+1) + k; i3 = i7+1;
+        i8 = (i*(numY+1) + (j+1))*(numZ+1) + k; i4 = i8+1;
+
+        if ((i + j + k) % 2 == 1) {
+          addTetra(i1, i2, i3, i6);
+          addTetra(i6, i3, i8, i7);
+          addTetra(i1, i8, i3, i4);
+          addTetra(i1, i6, i8, i5);
+          addTetra(i1, i3, i8, i6);
+        }
+        else {
+          addTetra(i2, i5, i4, i1);
+          addTetra(i2, i7, i5, i6);
+          addTetra(i2, i4, i7, i3);
+          addTetra(i5, i7, i4, i8);
+          addTetra(i2, i5, i7, i4);
+        }
+      }
+    }
+  }
+}
+
+// --------------- find tetra neighbors -----------------------------
+
+struct Entry {
+  Vertex *v0, *v1, *v2;
+  Tetra  *tetra;
+  int sideNr;
+  void sort() {
+    Vertex *v;
+    if (v0 > v1) { v = v0; v0 = v1; v1 = v; }
+    if (v1 > v2) { v = v1; v1 = v2; v2 = v; }
+    if (v0 > v1) { v = v0; v0 = v1; v1 = v; }
+  }
+  bool smallerThen(Entry &e) {
+    if (v0 < e.v0) return true;
+    if (v0 > e.v0) return false;
+    if (v1 < e.v1) return true;
+    if (v1 > e.v1) return false;
+    if (v2 < e.v2) return true;
+    return false;
+  }
+  bool equal(Entry &e) {
+    return v0 == e.v0 && v1 == e.v1 && v2 == e.v2;
+  }
+};
+
+// ---------------------------------------------------------------------
+void QuickSortEntries(Entry *entries, int l, int r)
+// ---------------------------------------------------------------------
+{
+  int i,j, mi;
+  Entry k, m;
+
+  i = l; j = r; mi = (l + r)/2;
+  m = entries[mi];
+  while (i <= j) {
+    while(entries[i].smallerThen(m)) i++;
+    while(m.smallerThen(entries[j])) j--;
+    if (i <= j) {
+      k = entries[i]; entries[i] = entries[j]; entries[j] = k;
+      i++; j--;
+    }
+  }
+  if (l < j) QuickSortEntries(entries, l, j);
+  if (i < r) QuickSortEntries(entries, i, r);
+}
+
+// ---------------------------------------------------------------------
+void TetraMesh::findTetraNeighbors()
+// ---------------------------------------------------------------------
+{
+  int i,side;
+  int numEntries = _tetras.count() * 4;
+  Entry *entries = new Entry[numEntries];
+  Entry *e = entries;
+
+  for (i = 0; i < _tetras.count(); i++) {
+    Tetra *t = _tetras[i];
+    for (side = 0; side < 4; side++) {
+      t->_neighbor[side] = NULL;
+      e->v0 = t->sideVertex(side, 0);
+      e->v1 = t->sideVertex(side, 1);
+      e->v2 = t->sideVertex(side, 2);
+      e->tetra = t;
+      e->sideNr = side;
+      e->sort();
+      e++;
+    }
+  }
+
+  QuickSortEntries(entries, 0, numEntries - 1);
+
+  for (i = 0; i < numEntries-1; i++) {
+    Entry *e1 = &entries[i];
+    Entry *e2 = &entries[i+1];
+    if (e1->equal(*e2)) {
+      assert(e1->tetra->_neighbor[e1->sideNr] == NULL);
+      e1->tetra->_neighbor[e1->sideNr] = e2->tetra;
+      assert(e2->tetra->_neighbor[e2->sideNr] == NULL);
+      e2->tetra->_neighbor[e2->sideNr] = e1->tetra;
+    }
+  }
+
+  delete[] entries;
+}
+
+
+// --------------------------------------------------------------
+void TetraMesh::computeForceDistribution(Vertex *v, float radius)
+// --------------------------------------------------------------
+{
+  Vector3d center = v->_worldCoord;
+
+  float sum = 0.0;
+  for (int i = 0; i < _vertices.count(); i++) {
+    Vertex *vi = _vertices[i];
+    float d = vi->_worldCoord.dist(center);
+    if (d < radius)
+      vi->_forceDistr = (1.0 - d / radius);
+    else
+      vi->_forceDistr = 0.0;
+    sum += vi->_forceDistr;
+  }
+
+  // make sure the sum is 1.0
+  if (sum <= 0.0) return;
+  sum = 1.0/sum;
+  for (int i = 0; i < _vertices.count(); i++) {
+    _vertices[i]->_forceDistr *= sum;
+  }
+}
+
+
+// -----------------------------------------------------
+void TetraMesh::clearExternalForces()
+// -----------------------------------------------------
+{
+  for (int i = 0; i < _vertices.count(); i++) {
+    _vertices[i]->_fExt.setZero();
+    _vertices[i]->_fColl.setZero();
+  }  
+}
+
+ //------------------------------------------------------
+void TetraMesh::addExternalForcesRep( TetraMesh *mesh1, TetraMesh *mesh2)
+//------------------------------------------------------
+// Añadir en el .h
+{
+ float radio= 0.0001*0.02;
+ float dx, dy,dz;
+ float d;
+ Vector3d coord;
+ int i, k;
+
+  //for (i=0; i< mesh1->_verticesFrontera.count(); ++i){
+  for (i=0; i< mesh1->_vertices.count(); ++i){
+       //Vertex *v = mesh1->_verticesFrontera[i];
+       Vertex *v = mesh1->_vertices[i];
+       coord =  v-> _originalCoord;
+            //for (k = 0; k < mesh2->_verticesFrontera.count(); k++) {
+            for (k = 0; k < mesh2->_vertices.count(); k++) {
+            //Vertex *vi = mesh2->_verticesFrontera[k];
+            Vertex *vi = mesh2->_vertices[k];
+            Vector3d frn;
+            Vector3d frp;
+            //if (l!=k){
+            d = coord.dist(vi->_originalCoord);
+                if (d <= radio) {
+                frn.set(-2/pow(d,2), 0, -2/pow(d,2));
+                frp.set(2/pow(d,2), 0, 2/pow(d,2));
+
+                /*frn.set(-v->_mass * physicsParams.gravityConst, 0, -v->_mass * physicsParams.gravityConst);
+                frp.set(vi->_mass * physicsParams.gravityConst,0, vi->_mass * physicsParams.gravityConst);*/
+
+                v->_fExt.add(frn);
+                vi -> _fExt.add (frp);}
+                }
+                }}
+
+
+
+
+// -----------------------------------------------------
+void TetraMesh::addExternalForces()
+// -----------------------------------------------------
+{
+  // gravity force & collision forces
+
+  int i,j;
+   int k, l;
+//----- Datos repulsión------
+  float radio= 0.0001*0.02;
+  float dx, dy,dz;
+  float d;
+  Vector3d coord;
+  //---------------------------
+
+  for (i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+
+    // gravity force
+    Vector3d fg; fg.set(0.0, -v->_mass * physicsParams.gravityConst, 0.0);
+    v->_fExt.add(fg);
+  }
+
+  /* for (l=0; l < _verticesFrontera.count(); l++){
+    Vertex *v = _verticesFrontera[l];
+    coord =  v-> _originalCoord;
+            for (k = 0; k < _verticesFrontera.count(); k++) {
+            Vertex *vi = _verticesFrontera[k];
+            Vector3d frn;
+            Vector3d frp;
+            if (l!=k){
+            d = coord.dist(vi->_originalCoord);
+                if (d <= radio) {
+                frn.set(-2/pow(d,2), -2/pow(d,2), -2/pow(d,2));
+                frp.set(2/pow(d,2), -2/pow(d,2), -2/pow(d,2));
+                v->_fExt.add(frn);
+                vi -> _fExt.add (frp);}  }
+     }
+
+     }   */
+
+     Vertex *v = _verticesFrontera[5];
+    Vector3d f;
+    f.set (1.0 ,1.0, 10.0);
+    v->_fExt.add(f);
+
+  if (_springVertex == NULL) return;
+
+  // Al pasar este if(), solamente afectará lo que se ponga a cada mallado por separado, y
+  // no a los dos a la vez
+
+  // grab spring force
+  Vector3d springForce;
+  springForce.sub(_springPos, _springVertex->_worldCoord);
+  springForce.scale(physicsParams.grabSpringConst);
+
+  for (i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    Vector3d f = springForce; f.scale(v->_forceDistr);
+    v->_fExt.add(f);
+    }
+
+   /* Vertex *v = _verticesFrontera[5];
+    Vector3d f;
+    f.set (1.0 ,1.0, 10.0);
+    v->_fExt.add(f); */
+
+   //Tira de un nodo en sentido positivo de z.
+   //Quitar el for de arriba para que solamente actúe esta fuerza
+
+  /*for (l=0; l < _verticesFrontera.count(); l++){
+    Vertex *v = _verticesFrontera[l];
+    coord =  v-> _originalCoord;
+            for (k = 0; k < _verticesFrontera.count(); k++) {
+            Vertex *vi = _verticesFrontera[k];
+            Vector3d frn;
+            Vector3d frp;
+            if (l!=k){
+            d = coord.dist(vi->_originalCoord);
+                if (d <= radio) {
+                frn.set(-10, -10, -10);
+                frp.set(510, 10, 10);
+                v->_fExt.add(frn);
+                vi -> _fExt.add (frp);}  }
+     }
+
+     }  */
+
+
+    /*
+    // Repulsión
+
+    for (l=0; l < _verticesFrontera.count(); l++){
+    Vertex *v = _verticesFrontera[l];
+    coord =  v-> _originalCoord;
+     for (k = 0; k < _verticesFrontera.count(); k++) {
+    Vertex *vi = _verticesFrontera[k];
+     Vector3d frn;
+     Vector3d frp;
+    dx = sqrt(coord.x - (vi->_originalCoord.x));
+    dy = sqrt(coord.y - (vi->_originalCoord.y));
+    dz = sqrt(coord.z - (vi->_originalCoord.z));
+    if(dx <= radio )   {
+              if(dy<= radio ) {
+                if (dz <= radio ) {
+                 frn.set(-2/pow(dx,2), -2/pow(dx,2), -2/pow(dx,2));
+                 frp.set(2/pow(dx,2), 2/pow(dx,2), 2/pow(dx,2));
+                 v->_fExt.add(frn);
+                 vi -> _fExt.add (frp);}
+                 else {
+                 frn.set(-2/pow(dx,2), -2/pow(dx,2), 0.0);
+                 frp.set(2/pow(dx,2), 2/pow(dx,2), 0.0);
+                 v->_fExt.add(frn);
+                 vi -> _fExt.add (frp);}}
+                 else {
+                 frn.set(-2/pow(dx,2), 0.0, 0.0);
+                 frp.set(2/pow(dx,2), 0.0, 0.0);
+                 v->_fExt.add(frn);
+                 vi -> _fExt.add (frp);
+                 } }
+
+              if ((dy <= radio)&& (dx > radio)){
+
+               if (dz <= radio) {
+               frn.set(0.0, -2/pow(dx,2), -2/pow(dx,2));
+               frp.set(0.0, 2/pow(dx,2), 2/pow(dx,2));
+               v->_fExt.add(frn);
+               vi -> _fExt.add (frp);
+               }
+               else {
+               frn.set(0.0, -2/pow(dx,2), 0.0);
+               frp.set(0.0, 2/pow(dx,2), 0.0);
+               v->_fExt.add(frn);
+               vi -> _fExt.add (frp);
+               }
+               }
+               if ((dz <= radio)&& (dx > radio) && (dy > radio)){
+               frn.set(0.0, 0.0, -2/pow(dx,2));
+               frp.set(0.0, 0.0, 2/pow(dx,2));
+               v->_fExt.add(frn);
+               vi -> _fExt.add (frp);
+               }  }
+}  */
+
+}
+
+
+      /* //------- Repulsión -------------
+
+    Vector3d coord;
+    coord = v-> _originalCoord;
+    for (k=0; k < _vertices.count(); k++){
+     Vertex *vi = _vertices[k];
+     Vector3d frn;
+     Vector3d frp;
+    dx = sqrt(coord.x - (vi->_originalCoord.x));
+    dy = sqrt(coord.y - (vi->_originalCoord.y));
+    dz = sqrt(coord.z - (vi->_originalCoord.z));
+    if(dx <= radio )   {
+              if(dy<= radio ) {
+                if (dz <= radio ) {
+                 frn.set(-2/pow(dx,2), -2/pow(dx,2), -2/pow(dx,2));
+                 frp.set(2/pow(dx,2), 2/pow(dx,2), 2/pow(dx,2));
+                 v->_fExt.add(frn);
+                 vi -> _fExt.add (frp);}
+                 else {
+                 frn.set(-2/pow(dx,2), -2/pow(dx,2), 0.0);
+                 frp.set(2/pow(dx,2), 2/pow(dx,2), 0.0);
+                 v->_fExt.add(frn);
+                 vi -> _fExt.add (frp);}}
+                 else {
+                 frn.set(-2/pow(dx,2), 0.0, 0.0);
+                 frp.set(2/pow(dx,2), 0.0, 0.0);
+                 v->_fExt.add(frn);
+                 vi -> _fExt.add (frp);
+                 } }
+
+              if ((dy <= radio)&& (dx > radio)){
+
+               if (dz <= radio) {
+               frn.set(0.0, -2/pow(dx,2), -2/pow(dx,2));
+               frp.set(0.0, 2/pow(dx,2), 2/pow(dx,2));
+               v->_fExt.add(frn);
+               vi -> _fExt.add (frp);
+               }
+               else {
+               frn.set(0.0, -2/pow(dx,2), 0.0);
+               frp.set(0.0, 2/pow(dx,2), 0.0);
+               v->_fExt.add(frn);
+               vi -> _fExt.add (frp);
+               }
+               }
+               if ((dz <= radio)&& (dx > radio) && (dy > radio)){
+               frn.set(0.0, 0.0, -2/pow(dx,2));
+               frp.set(0.0, 0.0, 2/pow(dx,2));
+               v->_fExt.add(frn);
+               vi -> _fExt.add (frp);
+               }  }
+
+    //-------------------------------------------------------------- */
+
+
+
+//}
+
+
+// ---------------------------------------------------------------------
+void TetraMesh::conjugateGradients(int minIters, int maxIters,
+                  VertexArray &verts)
+// ---------------------------------------------------------------------
+{
+  int i,j;
+  double rr1,rr2, pu, alpha, beta;
+  Vertex *v;
+  int numVerts = verts.count();
+
+  /* p = r = b-Ax */
+
+  for (j = 0; j < _vertices.count(); j++) {
+    v = _vertices[j];
+    v->_p.setZero(); v->_r.setZero(); v->_u.setZero();
+  }
+
+  for (j = 0; j < numVerts; j++) {
+    verts[j]->multiply(false);
+  }
+
+  for (i = 0; i < maxIters; i++) {
+
+    /* u = Ap */
+    rr1 = 0.0; pu = 0.0;
+
+    for (j = 0; j < numVerts; j++) {
+      v = verts[j];
+      v->multiply(true);
+      rr1 += v->_r.inner(v->_r);
+            pu  += v->_p.inner(v->_u);
+    }
+
+    /* alpha = (r*r)/(p*u) */
+    if (fabs(pu) < EPSILON) pu = EPSILON;
+    alpha = rr1 / pu;
+
+    /* x = x + alpha * p */
+    /* r = r - alpha * u */
+
+    rr2 = 0.0;
+
+    for (j = 0; j < numVerts; j++) {
+      v = verts[j];
+      v->_solution.x += alpha*v->_p.x;
+      v->_solution.y += alpha*v->_p.y;
+      v->_solution.z += alpha*v->_p.z;
+      // todo: divergence
+      if (fabs(v->_solution.len2()) > 1e5) {
+        reset();
+        return;
+      }
+      v->_r.x -= alpha*v->_u.x;
+      v->_r.y -= alpha*v->_u.y;
+      v->_r.z -= alpha*v->_u.z;
+      rr2 += v->_r.inner(v->_r);
+    }
+    if (i >= minIters && rr2 < GJ_ERROR_THRESHOLD) break;
+
+    /* beta = r*r / r_old*r_old */
+    if (fabs(rr1) < EPSILON) rr1 = EPSILON;
+    beta = rr2/rr1;
+
+    /* p = r + beta*p */
+
+    for (j = 0; j < numVerts; j++) {
+      v = verts[j];
+      v->_p.x = v->_r.x + beta * v->_p.x;
+      v->_p.y = v->_r.y + beta * v->_p.y;
+      v->_p.z = v->_r.z + beta * v->_p.z;
+    }
+  }
+}
+
+
+// ---------------------------------------------------------------------
+void TetraMesh::gaussSeidel(int iters, VertexArray &verts)
+// ---------------------------------------------------------------------
+{
+  int numVerts = verts.count();
+  for (int i = 0; i < iters; i++) {
+    for (int j = 0; j < numVerts; j++) {
+      Vertex *v = verts[j];
+      v->gaussSeidel();
+    }
+  }
+}
+ /*
+
+// -----------------------------------------------------
+void TetraMesh::animate(int numIters, TetraMesh *mesh1, TetraMesh *mesh2)
+// -----------------------------------------------------
+{
+  int i;
+  float delta_t = physicsParams.timeStep;
+
+  clearExternalForces();
+  addExternalForces();
+  //addExternalForcesRep(this, mesh2);
+  addExternalForcesRep(mesh1, mesh2);
+
+  for (i = 0; i < numIters; i++)
+    animateDynamic(delta_t);
+}  */
+
+// -----------------------------------------------------
+void TetraMesh::animate(int numIters)
+// -----------------------------------------------------
+{
+  int i;
+  float delta_t = physicsParams.timeStep;
+
+  clearExternalForces();
+  addExternalForces();
+
+  for (i = 0; i < numIters; i++)
+    animateDynamic(delta_t);
+}
+
+
+
+// -----------------------------------------------------
+void TetraMesh::animateDynamic(float delta_t)
+// -----------------------------------------------------
+{
+  int i;
+
+  // setup linear system
+  for (i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    v->subStiffness();
+    v->_f0.setZero();
+  }
+
+  for (i = 0; i < _tetras.count(); i++) {
+    Tetra *tetra = _tetras[i];
+    if (physicsParams.warpedStiffness)
+      tetra->updateOrientation();
+    else
+      tetra->resetOrientation();
+    tetra->addElasticCoeffs();
+  }
+
+  _activeVertices.clear();
+  for (i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    if (!v->_animated) continue;
+    v->setupDynamicEquation(delta_t, physicsParams.dynamicDamping);
+    _activeVertices.add(v);
+  }
+  /*
+   //---------------------------------------------------------
+   for (i = 0; i < _verticesFrontera.count(); i++) {
+    Vertex *v = _verticesFrontera[i];
+    if (!v->_animated) continue;
+    v->setupDynamicEquation(delta_t, physicsParams.dynamicDamping);
+    _activeVerticesFrontera.add(v);
+  }
+  //-------------------------------------------------------------
+  */
+  // solve linear system
+  conjugateGradients(physicsParams.solverIterations,
+    physicsParams.solverIterations, _activeVertices);
+//  gaussSeidel(GC_ITERATIONS, _activeVertices);
+
+  for (i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    if (!v->_animated) continue;
+    v->_velocity = v->_solution;
+    v->_worldCoord.x += delta_t * v->_velocity.x;
+    v->_worldCoord.y += delta_t * v->_velocity.y;
+    v->_worldCoord.z += delta_t * v->_velocity.z;
+  }
+
+  //-----------------------------------------------
+
+  for (i = 0; i < _verticesFrontera.count(); i++) {
+    Vertex *v = _verticesFrontera[i];
+    if (!v->_animated) continue;
+    v->_velocity = v->_solution;
+    v->_worldCoord.x += delta_t * v->_velocity.x;
+    v->_worldCoord.y += delta_t * v->_velocity.y;
+    v->_worldCoord.z += delta_t * v->_velocity.z;
+  }
+
+
+  //-----------------------------------------------
+
+  // prevent overstretching
+
+  if (physicsParams.warpedStiffness) {
+    for (i = 0; i < _vertices.count(); i++) {
+      Vertex *v = _vertices[i];
+      if (!v->_animated) continue;
+      int iters = 5;
+      while (iters > 0 && v->preventOverstreching())
+        iters--;
+    }
+  }
+
+  updateBounds();
+}
+
+
+// -----------------------------------------------------
+void TetraMesh::draw()
+// -----------------------------------------------------
+{
+  int i;
+
+  if (draw3d.drawVertices) {
+    float f =  avgTetraSize();
+    for (i = 0; i < _vertices.count(); i++)
+      _vertices[i]->draw(f*0.1);
+  }    
+
+  for (i = 0; i < _tetras.count(); i++)
+    _tetras[i]->draw();
+}
+
+
+// -------------------------------------------------------------
+Vertex *TetraMesh::findClosestVertex(int x, int y, float &depth)
+// -------------------------------------------------------------
+{
+  float min = 0.0;
+  float dist;
+  int mini = 0;
+  int xi, yi;
+  float minDepth;
+
+  if (_vertices.count() <= 0) return NULL;
+  for (int i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    draw3d.project(v->_worldCoord, xi, yi, depth );
+    dist = (x - xi)*(x - xi) + (y - yi)*(y - yi);
+    if ((i == 0) || (dist < min)) {
+      min = dist;
+      mini = i;
+      minDepth = depth;
+    }
+  }
+  if (min < GRAB_MIN_PIXELS*GRAB_MIN_PIXELS) {
+    depth = minDepth;
+    return _vertices[mini];
+  }
+  else {
+    depth = 0.0;
+    return NULL;
+  }
+}
+
+// -----------------------------------------------------
+void TetraMesh::mouseDown(int x, int y)
+// -----------------------------------------------------
+{
+  if (_tetras.count() == 0) return;
+  float depth;
+  _springVertex = findClosestVertex(x, y, depth);
+  if (_springVertex != NULL) {
+    int xi,yi;
+    draw3d.project(_springVertex->_worldCoord, xi, yi, _springDepth);
+    draw3d.unProject(x,y, _springDepth, _springPos);
+    computeForceDistribution(_springVertex, physicsParams.grabForceRadius);
+  }
+}
+
+
+// -----------------------------------------------------
+void TetraMesh::mouseMove(int x, int y)
+// -----------------------------------------------------
+{
+  draw3d.unProject(x,y, _springDepth, _springPos);
+}
+
+// -----------------------------------------------------
+void TetraMesh::mouseUp(int x, int y)
+// -----------------------------------------------------
+{
+  _springVertex = NULL;
+}
+
+
+// -----------------------------------------------------
+void TetraMesh::getBounds(Bounds3d &bounds)
+// -----------------------------------------------------
+{
+  bounds = _bounds;
+}
+
+
+// -----------------------------------------------------
+void TetraMesh::fixBottom(float fract)
+// -----------------------------------------------------
+{
+  float h  = fract * (_bounds._max.y - _bounds._min.y);
+  float y0 = _bounds._min.y;
+  for (int i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    if (v->_worldCoord.y - y0 < h)
+      v->_animated = false;
+  }
+}
+
+// -----------------------------------------------------
+void TetraMesh::fixTop(float fract)
+// -----------------------------------------------------
+{
+  float h  = fract * (_bounds._max.y - _bounds._min.y);
+  float y0 = _bounds._max.y;
+  for (int i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    if (y0 - v->_worldCoord.y < h)
+      v->_animated = false;
+  }
+}
+
+
+// -----------------------------------------------------
+void TetraMesh::fixLeft(float fract)
+// -----------------------------------------------------
+{
+  float h  = fract * (_bounds._max.x - _bounds._min.x);
+  float x0 = _bounds._min.x;
+  for (int i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    if (v->_worldCoord.x - x0 < h)
+      v->_animated = false;
+  }
+}
+
+
+// -----------------------------------------------------
+void TetraMesh::fixRight(float fract)
+// -----------------------------------------------------
+{
+  float h  = fract * (_bounds._max.x - _bounds._min.x);
+  float x0 = _bounds._min.x;
+  for (int i = 0; i < _vertices.count(); i++) {
+    Vertex *v = _vertices[i];
+    if (x0 - v->_worldCoord.x < h)
+      v->_animated = false;
+  }
+}
+
+
+// -----------------------------------------------------
+void TetraMesh::fixNone()
+// -----------------------------------------------------
+{
+  for (int i = 0; i < _vertices.count(); i++)
+    _vertices[i]->_animated = _vertices[i]->numNeighbors() > 0;
+}
+
+
+// -----------------------------------------------------
+void TetraMesh::rotate(float phiX, float phiY, float phiZ)
+// -----------------------------------------------------
+{
+  int numVerts = _vertices.count();
+  if (numVerts <= 0) return;
+  Vector3d center; center.setZero();
+  int i = 0;
+  for (i = 0; i < numVerts; i++)
+    center.add(_vertices[i]->_worldCoord);
+  center.scale(1.0 / numVerts);
+  for (i = 0; i < numVerts; i++) {
+    Vertex *v = _vertices[i];
+    Vector3d r; r.sub(v->_worldCoord, center);
+    r.rotateX(phiX);
+    r.rotateY(phiY);
+    r.rotateZ(phiZ);
+    v->_worldCoord.add(center, r);
+  }
+}
+
+
+

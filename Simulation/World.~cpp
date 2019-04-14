@@ -1,0 +1,272 @@
+#include <stdlib.h>
+#include <math.h>
+#include "World.h"
+#include "TetraMesh.h"
+#include "Draw.h"
+#include "PhysicsParams.h"
+#include "Utils.h"
+
+//---------------------------------------------------------------------------
+
+#define INIT_ARRAY_SIZE 1000
+
+//-----------------------------------------------------------
+World::World(char *applicationPath)
+//-----------------------------------------------------------
+{
+  _tetraMeshes = new TetraMesh*[INIT_ARRAY_SIZE];
+  _numTetraMeshes = 0;
+  _tetraMeshesSize = INIT_ARRAY_SIZE;
+  _groundPlaneY = 0.;
+
+  setupTestWorld();
+}
+
+
+//-----------------------------------------------------------
+World::~World()
+//-----------------------------------------------------------
+{
+  int i,j;
+
+  for (i = 0; i < _numTetraMeshes; i++) {
+    _tetraMeshes[i]->deleteAllObjects();
+    delete _tetraMeshes[i];
+  }
+  delete[] _tetraMeshes;
+}
+
+
+//-----------------------------------------------------------
+void World::setupTestWorld()
+//-----------------------------------------------------------
+{
+  Vector3d trans, trans1;
+  trans.setZero();
+  TetraMesh *mesh1, *mesh2;
+
+  trans.y += 0.2;
+  trans1.y += 0.2;
+  trans1.x += 0.1;
+  mesh1 = new TetraMesh(this, 3,15,5,0.02, trans);
+  mesh2 = new TetraMesh(this, 3,15,5,0.02, trans1);
+  add(mesh1);
+  add(mesh2);
+  mesh1->fixTop(0.1);
+  mesh2->fixTop(0.1);
+  /* interact (mesh1, mesh2);
+void World::interact (TetraMesh *mesh1, TetraMesh *mesh2) {
+
+   Añadir también Vertex.h
+   Añadir repulsión con el mismo tetraedro en otro método dentro de TetraMesh.
+   Entra como parámetri el otro mallado y se compara la distancia de los vértices de
+   este con los del mallado anfitrión. Cambiar animate() y que solamente cargue
+   addExternalForces de cada uno de los mallados y la interacción entre stos en cada
+   iteración
+
+  for (i=0; i< mesh1->_verticesFrontera.count(); ++i){
+       Vertex *v = mesh1->_verticesFrontera[l];
+       coord =  v-> _originalCoord;
+            for (k = 0; k < mesh2->_verticesFrontera.count(); k++) {
+            Vertex *vi = mesh2->_verticesFrontera[k];
+            Vector3d frn;
+            Vector3d frp;
+            //if (l!=k){
+            d = coord.dist(vi->_originalCoord);
+                if (d <= radio) {
+                frn.set(-2/pow(d,2), -2/pow(d,2), -2/pow(d,2));
+                frp.set(2/pow(d,2), 2/pow(d,2), 2/pow(d,2));
+                v->_fExt.add(frn);
+                vi -> _fExt.add (frp);}
+                //}
+     }
+
+     }
+       )
+
+
+  }
+   Añadir un bucle for que me compare las distancias entre los miembros de
+   _verices de cada mallado. Si la distancia menor de un valor, entonces
+   añadirles fuerza de repulsión. Añadirles esto también a los vértices de cada
+   mallado entre ellos.
+  }
+
+  */
+  /*mesh1->_verticesTotal = mesh1->_vertices+mesh2->_vertices;
+  mesh2->_verticesTotal = mesh1->_vertices+mesh2->_vertices;*/
+  physicsParams.warpedStiffness = true;
+  draw3d.drawVertices = true;
+  draw3d.drawTetras = true;
+}
+
+//----------------------------------------------------------
+void World::interact (TetraMesh *mesh1, TetraMesh *mesh2) {
+
+int i =0;
+int k=0;
+
+ //float radio= 0.0001*0.02;
+ float radio= 1;
+ float dx, dy,dz;
+ float d;
+ Vector3d coord;
+
+  //for (i=0; i< mesh1->_verticesFrontera.count(); ++i){
+  for (i=0; i< mesh1->_vertices.count(); ++i){
+       //Vertex *v = mesh1->_verticesFrontera[i];
+       Vertex *v = mesh1->_vertices[i];
+       coord =  v-> _originalCoord;
+            //for (k = 0; k < mesh2->_verticesFrontera.count(); k++) {
+            for (k = 0; k < mesh2->_vertices.count(); k++) {
+            //Vertex *vi = mesh2->_verticesFrontera[k];
+            Vertex *vi = mesh2->_vertices[k];
+            Vector3d frn;
+            Vector3d frp;
+            //if (l!=k){
+            d = coord.dist(vi->_originalCoord);
+                if (d <= radio) {
+                frn.set(-2/pow(d,2), -2/pow(d,2), -2/pow(d,2));
+                frp.set(2/pow(d,2), 2/pow(d,2), 2/pow(d,2));
+
+                /*frn.set(-v->_mass * physicsParams.gravityConst, 0, -v->_mass * physicsParams.gravityConst);
+                frp.set(vi->_mass * physicsParams.gravityConst,0, vi->_mass * physicsParams.gravityConst); */
+
+                v->_fExt.add(frn);
+                vi -> _fExt.add (frp);}
+                }
+                }}
+//----------------------------------------------------------
+
+//-----------------------------------------------------------
+void World::add(TetraMesh *mesh)
+//-----------------------------------------------------------
+{
+  if (_numTetraMeshes >= _tetraMeshesSize) {
+    _tetraMeshesSize *= 2;
+    TetraMesh **newList = new TetraMesh*[_tetraMeshesSize];
+    for (int i = 0; i < _numTetraMeshes; i++)
+      newList[i] = _tetraMeshes[i];
+    delete[] _tetraMeshes;
+    _tetraMeshes = newList;
+  }
+  _tetraMeshes[_numTetraMeshes] = mesh;
+  _numTetraMeshes++;
+}
+
+
+//-----------------------------------------------------------
+void World::animate()
+//-----------------------------------------------------------
+{
+   /*_tetraMeshes[0]->clearExternalForces();
+   _tetraMeshes[1]->clearExternalForces();
+  interact(_tetraMeshes[0],_tetraMeshes[1]); */
+
+
+  for (int i = 0; i < _numTetraMeshes; i++) {
+  if (i==0){
+    _tetraMeshes[i]->animate(1,_tetraMeshes[i], _tetraMeshes[i+1]);  }
+    else  {
+     _tetraMeshes[i]->animate(1, _tetraMeshes[i-1], _tetraMeshes[i]); }
+  }
+  /*_tetraMeshes[0]->animate(1,_tetraMeshes[0], _tetraMeshes[1]);
+  _tetraMeshes[1]->animate(1,_tetraMeshes[0], _tetraMeshes[1]); */
+
+
+}
+
+
+//-----------------------------------------------------------
+void World::draw()
+//-----------------------------------------------------------
+{
+  int i;
+
+  draw3d.groundPlane(_groundPlaneY);
+
+  for (int i = 0; i < _numTetraMeshes; i++) {
+    _tetraMeshes[i]->draw();
+  }
+}
+
+
+//-----------------------------------------------------------
+void World::mouseDown(int x, int y)
+//-----------------------------------------------------------
+{
+  float depth, minDepth;
+  int mini = -1;
+
+  for (int i = 0; i < _numTetraMeshes; i++) {
+    if (_tetraMeshes[i]->findClosestVertex(x, y, depth) != NULL) {
+      if (mini < 0 || depth < minDepth) {
+        minDepth = depth;
+        mini = i;
+      }
+    }
+  }
+  if (mini < 0) return;
+  _tetraMeshes[mini]->mouseDown(x,y);
+}
+
+//-----------------------------------------------------------
+void World::mouseMove(int x, int y)
+//-----------------------------------------------------------
+{
+  for (int i = 0; i < _numTetraMeshes; i++) {
+    _tetraMeshes[i]->mouseMove(x,y);
+  }
+}
+
+//-----------------------------------------------------------
+void World::mouseUp(int x, int y)
+//-----------------------------------------------------------
+{
+  for (int i = 0; i < _numTetraMeshes; i++) {
+    _tetraMeshes[i]->mouseUp(x,y);
+  }
+}
+
+//-----------------------------------------------------------
+void World::getBounds(Bounds3d &bounds)
+//-----------------------------------------------------------
+{
+  if (_numTetraMeshes <= 0) {
+    bounds.clear();
+    return;
+  }
+
+  _tetraMeshes[0]->getBounds(bounds);
+
+  for (int i = 1; i < _numTetraMeshes; i++) {
+    Bounds3d boundsi;
+    _tetraMeshes[i]->getBounds(boundsi);
+    bounds.combine(bounds, boundsi);
+  }
+}
+
+
+//-----------------------------------------------------------
+int World::numTetras()
+//-----------------------------------------------------------
+{
+  int num = 0;
+  for (int i = 0; i < _numTetraMeshes; i++)
+    num += _tetraMeshes[i]->numTetras();
+  return num;
+}
+
+
+//-----------------------------------------------------------
+int World::numVertices()
+//-----------------------------------------------------------
+{
+  int num = 0;
+  for (int i = 0; i < _numTetraMeshes; i++)
+    num += _tetraMeshes[i]->numVertices();
+  return num;
+}
+
+
+
