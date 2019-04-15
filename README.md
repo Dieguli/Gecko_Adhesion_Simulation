@@ -11,11 +11,11 @@ The result was a numerical model that allowed simulating the interaction of the 
 
 The project was carried out in the context of the course “Ingenia” as part of the Master´s Programme in Industrial Engineering, held in the Escuela Técnia Superior de Ingenieros Industriales de la Universidad Politécnica de Madrid (ETSII-UPM).
 
-![Figure 1: Spatula and substrate 1 ](/Screen_Shot/Captura1.jpg)
+![Figure 1: Spatula and substrate 1 ](https://github.com/Dieguli/Gecko_Adhesion_Simulation/tree/master/Screen_Shot/Captura1.jpg)
 
-![Figure 2: Spatula and substrate 2 ](/Screen_Shot/Captura2.jpg)
+![Figure 2: Spatula and substrate 2 ](https://github.com/Dieguli/Gecko_Adhesion_Simulation/tree/master/Screen_Shot/Captura2.jpg)
 
-![Figure 3: Spatula and substrate 3 ](/Screen_Shot/Captura3.jpg)
+![Figure 3: Spatula and substrate 3 ](https://github.com/Dieguli/Gecko_Adhesion_Simulation/tree/master/Screen_Shot/Captura3.jpg)
 
 References:
 
