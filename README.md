@@ -13,7 +13,7 @@ The project was carried out in the context of the course “Ingenia” as part o
 
 ![Figure 1: Spatula and substrate 1 ](Screen_Shot/Captura1.JPG)    ![Figure 2: Spatula and substrate 2 ](Screen_Shot/Captura2.JPG)
 
-                                ![Figure 3: Spatula and substrate 3 ](Screen_Shot/Captura3.JPG)
+![Figure 3: Spatula and substrate 3 ](Screen_Shot/Captura3.JPG)
 
 References:
 
